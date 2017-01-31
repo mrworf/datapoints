@@ -16,6 +16,9 @@ import argparse
 import datetime
 import traceback
 import random
+import uuid
+from storage import Storage
+
 
 """ Parse command line """
 parser = argparse.ArgumentParser(description="dataPoints - Gather all your data points in one place", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -52,132 +55,6 @@ logging.getLogger("werkzeug").setLevel(logging.ERROR)
 app = Flask(__name__)
 
 """ Initiate database connection """
-class Storage:
-  VALIDATION_OK = 0
-  VALIDATION_NOT_SETUP = 1
-  VALIDATION_NEED_UPGRADE = 2
-  VALIDATION_ERROR = 255
-
-  def __init__(self):
-    # Holds all the sources AND the last recorded value (based on time)
-    self.cache = {}
-
-  def connect(self, user, pw, host, database):
-    try:
-      self.cnx = mysql.connector.connect(user=user, 
-                                         password=pw,
-                                         host=host,
-                                         database=database)
-      return True
-    except mysql.connector.Error as err:
-      if err.errno == errorcode.ER_ACCESS_DENIED_ERROR:
-        logging.error("Something is wrong with your user name or password")
-      elif err.errno == errorcode.ER_BAD_DB_ERROR:
-        logging.error("Database does not exist")
-      else:
-        logging.error(err)
-    return False
-
-  def validate(self):
-    """
-    Tests if the database is setup properly or if it needs to be installed
-    or upgraded.
-
-        0 = All is OK
-        1 = Missing table(s)
-        2 = Needs to upgrade
-      255 = Things went terribly wrong
-    """
-    cursor = self.cnx.cursor(buffered=True)
-    for table in [ 'sources', 'data' ]:
-      query = ("DESCRIBE " + table)
-      try:
-        cursor.execute(query)
-      except mysql.connector.Error as err:
-        cursor.close()
-        if err.errno == errorcode.ER_NO_SUCH_TABLE:
-          return Storage.VALIDATION_NOT_SETUP
-        else:
-          logging.error(err)
-          return Storage.VALIDATION_ERROR
-    cursor.close()
-    return Storage.VALIDATION_OK
-
-  def setup(self, force):
-    if force:
-      cursor = self.cnx.cursor(buffered=True)
-      for table in [ 'sources', 'data' ]:
-        query = ("DROP TABLE " + table)
-        try:
-          logging.info(query)
-          cursor.execute(query)
-        except mysql.connector.Error as err:
-          pass
-      cursor.close()
-
-    if self.validate() != Storage.VALIDATION_NOT_SETUP:
-      logging.error('Database is not in a state where it can be setup')
-      return False
-
-    sql = [
-      'CREATE TABLE sources (id int primary key auto_increment, name varchar(128) not null, uuid varchar(32) not null unique, type int not null, accuracy int not null, parameters text not null)',
-      'CREATE TABLE data (ts datetime not null, source int not null, value int not null)'
-    ]
-
-    cursor = self.cnx.cursor(buffered=True)
-    for s in sql:
-      try:
-        cursor.execute(s)
-      except mysql.connector.Error as err:
-        cursor.close()
-        logging.error('Failed to execute: ' + s)
-        logging.error(err)
-        return False
-    cursor.close()
-    return True
-
-  def disconnect(self):
-    self.cnx.close()
-
-  def prepare(self):
-    """
-    Loads up the cache and is now ready to be used
-    """
-    query = 'SELECT id, uuid, name, type, accuracy, parameters FROM sources'
-    cursor = self.cnx.cursor(dictionary=True, buffered=True)
-    try:
-      cursor.execute(query)
-      for row in cursor:
-        self.cache[row['uuid']] = row
-        self.cache[row['uuid']]['latest'] = None
-      return True
-    except mysql.connector.Error as err:
-      logging.error('Failed to add source: ' + repr(err));
-    finally:
-      cursor.close()
-    return False
-
-  def add_source(self, uuid, name, type = 0, accuracy = 1, parameters = ''):
-    query = 'INSERT INTO sources (uuid, name, type, accuracy, parameters) VALUES (%s, %s, %s, %s, %s)'
-    cursor = self.cnx.cursor(buffered=True)
-    try:
-      cursor.execute(query, (uuid, name, type, accuracy, parameters))
-      self.cnx.commit()
-      self.cache[uuid] = {
-        'id' : cursor.lastrowid,
-        'uuid' : uuid,
-        'name' : name,
-        'type' : type,
-        'accuracy' : accuracy,
-        'parameters' : parameters,
-        'latest' : None
-      }
-      return True
-    except mysql.connector.Error as err:
-      logging.error('Failed to add source: ' + repr(err));
-    finally:
-      cursor.close()
-    return False
 
 
 storage = Storage()
@@ -200,11 +77,7 @@ elif result != Storage.VALIDATION_OK:
   logging.error('Internal database error ' + repr(result))
   sys.exit(1)
 
-if not storage.add_source("abc", "testing"):
-  logging.debug('Adding source failed')
 storage.prepare()
-
-print repr(storage.cache)
 
 class WebSocket(WebSocketHandler):
   def open(self, remoteId):
@@ -219,6 +92,45 @@ class WebSocket(WebSocketHandler):
 
   def on_close(self):
     logging.info("Remote %s has disconnected", self.remoteId)
+
+@app.route("/register", methods=['POST'])
+def register():
+  result = {'error':None}
+
+  json = request.get_json()
+  if json is None or 'name' not in json or 'type' not in json:
+    result['error'] = "Invalid or missing JSON data"
+  else:
+    result['uuid'] = str(uuid.uuid4())
+    accuracy = json.get('accuracy', 1)
+    parameters = json.get('parameters', '')
+    if not storage.add_source(result['uuid'], json['name'], json['type'], accuracy, parameters):
+      result['error'] = 'Unable to add the new source'
+
+  ret = jsonify(result)
+  if result['error'] == None:
+    ret.status_code = 200
+  else:
+    ret.status_code = 500
+  return ret
+
+@app.route('/entry/<uuid>', methods=['PUT'])
+def add_data(uuid):
+  result = {'error':None}
+
+  json = request.get_json()
+  if json is None or 'value' not in json:
+    result['error'] = "Invalid or missing JSON data"
+  else:
+    if not storage.record(uuid, json['value'], json.get('ts', None)):
+      result['error'] = 'Unable to add new value. Invalid UUID?'
+  ret = jsonify(result)
+  if result['error'] == None:
+    ret.status_code = 200
+  else:
+    ret.status_code = 500
+  return ret
+
 
 """ Finally, launch! """
 if __name__ == "__main__":
