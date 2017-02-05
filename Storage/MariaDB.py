@@ -5,27 +5,19 @@ import logging
 import datetime
 import traceback
 import random
+import Storage
 
 import mysql.connector
 from mysql.connector import errorcode
 
-class Storage:
-  VALIDATION_OK = 0
-  VALIDATION_NOT_SETUP = 1
-  VALIDATION_NEED_UPGRADE = 2
-  VALIDATION_ERROR = 255
-
-  GROUP_MODE_SUM = 0
-  GROUP_MODE_AVERAGE = 1
-  GROUP_MODE_MEDIAN = 2
-
+class MariaDB:
   def __init__(self):
     # Holds all the sources AND the last recorded value (based on time)
     self.cache = {}
 
   def connect(self, user, pw, host, database):
     try:
-      self.cnx = mysql.connector.connect(user=user, 
+      self.cnx = mysql.connector.connect(user=user,
                                          password=pw,
                                          host=host,
                                          database=database)
@@ -117,7 +109,7 @@ class Storage:
           self.cache[row['uuid']]['latest'] = {
             'value' : r2['value'],
             'ts' : r2['ts']
-          } 
+          }
       return True
     except mysql.connector.Error as err:
       logging.error('Failed to prepare cache: ' + repr(err));
