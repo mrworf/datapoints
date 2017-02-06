@@ -34,7 +34,7 @@ import argparse
 import datetime
 import traceback
 import random
-import uuid
+from uuid import uuid4
 import Storage
 import json
 
@@ -107,13 +107,40 @@ def createResult(http_code, status, data=None):
 
 @app.route("/register", methods=['POST'])
 def register():
+  """
+  Expects the following:
+    { name : <name of source>, type : <int>, (accuracy : <int>, parameters : <str>) }
+
+  accuracy defaults to 1 if not defined
+  parameters defaults to blank if not defined
+
+  accuracy is essentially a divider which must be applied to the value of a data point to
+  get the actual value. This allows for complete control of accuracy (ie, fractions).
+
+  Neither accuracy nor parameters is used by the server at this point and is just passed
+  on to the application using the data.
+
+  type is used to indicate what the data represents from this source. Again, server does
+  not use this and it's up to the calling application to use this when visualizing.
+  THIS MAY CHANGE IN THE FUTURE!
+
+  If successful, the call will return a UUID which must be used when sending data points.
+
+  Result 200:
+    { status : <result of operation>, data : { uuid : <uuid> } }
+  Result 400:
+    --- happens when data is corrupt, ie, not JSON ---
+  Result 500:
+    { status : <result of operation> }
+
+  """
   result = None
 
   json = request.get_json()
   if json is None or 'name' not in json or 'type' not in json:
     result = createResult(500, "Invalid or missing JSON data")
   else:
-    uuid = str(uuid.uuid4())
+    uuid = str(uuid4())
     accuracy = json.get('accuracy', 1)
     parameters = json.get('parameters', '')
     if not database.add_source(uuid, json['name'], json['type'], accuracy, parameters):
@@ -123,16 +150,128 @@ def register():
 
   return result
 
-@app.route('/entry/<uuid>', methods=['PUT'])
+@app.route('/entry/<uuid>', methods=['PUT', 'GET'])
 def add_data(uuid):
   """
   Expects the following format of the data:
     { value : <value>, (ts : <timestamp>) }
   If timestamp is omitted, server fills in with current time
+
+  Result 200:
+    { status : OK }
+  Result 400:
+    --- Malformed JSON or otherwise incorrect data ---
+  Result 500:
+    { status : <error message> }
+
+  Using GET will retrieve the latest entry reported for the source
+  """
+  if request.method == 'GET':
+    json = database.query_latest([uuid])
+    if json is None:
+      return createResult(500, 'No such UUID or no data')
+    return createResult(200, 'OK', json)
+  elif request.method == 'PUT':
+    json = request.get_json()
+    return process_data(uuid, json)
+
+@app.route('/sources', methods=['GET'], defaults={'uuid' : None})
+@app.route('/source/<uuid>', methods=['GET'])
+def list_sources(uuid):
+  """
+  Returns a list of all registered sources or just one if uuid is provided:
+  [
+    { uuid : <uuid>, name : <str>, type : <int>, accuracy : <int>, parameters : <str> },
+    ...
+  ]
+  """
+  data = database.sources(uuid)
+
+  if data is None:
+    if uuid is None:
+      return createResult(500, "Unable to get list of registered sources")
+    else:
+      return createResult(500, "Unable to get source, no such uuid?")
+  return createResult(200, "OK", data)
+
+@app.route('/query', methods=['POST'])
+def query():
+  """
+  Requests information from server, format is as follows:
+
+  {
+   uuid : [ <uuid>, ... ],
+   (count : <nbr of results>),
+   (groupby : <period>, mode : <sum/average/median>),
+   (reverse : <bool>),
+   (range : { (start : <ts>), (end : <ts>) })
+  }
+
+  uuid is special, it can either be a <uuid> or an array of <uuid>'s
+  range requires either start, end or both
+
+  Server returns:
+
+  {
+    status : <msg>,
+    data : [
+      { ts : <timestamp>, uuid : <uuid>, value : <int> },
+      ...
+    ]
+  }
+
+  Please note that the value isn't corrected with the accuracy defined in source!
+
   """
   json = request.get_json()
-  return process_data(uuid, json)
+  if json is None or 'uuid' not in json:
+    return createResult(500, 'Missing uuid(s)')
 
+  uuids = json['uuid']
+  if not isinstance(uuids, list):
+    uuids = [uuids]
+  mode = json.get('mode', 'none').lower()
+  if mode == 'sum':
+    mode = Storage.GROUP_BY_SUM
+  elif mode == 'average':
+    mode = Storage.GROUP_BY_AVERAGE
+  elif mode == 'median':
+    mode = Storage.GROUP_BY_MEDIAN
+  elif mode == 'none':
+    mode = Storage.GROUP_BY_NONE
+  else:
+    return createResult(500, 'Unsupported mode')
+
+  ts_start = ts_end = None
+  if 'range' in json:
+    ts_start = json['range'].get('start', None)
+    ts_end   = json['range'].get('end', None)
+    if ts_start is None and ts_end is None:
+      return createResult(500, 'Using range requires start, end or both')
+    if ts_end is not None and ts_start is not None and ts_end < ts_start:
+      return createResult(500, 'Start of range has to be before end of range')
+
+  reverse = False
+  if json.get('reverse', False) != False:
+    reverse = True
+
+  iterator = database.query(uuids,
+                            ts_start,
+                            ts_end,
+                            json.get('count', 0),
+                            json.get('groupby', 0),
+                            mode,
+                            reverse)
+
+  # This part will need to be redone to allow streaming instead of buffering
+  result = []
+  e = iterator.next()
+  while e is not None:
+    result.append(e)
+    e = iterator.next()
+  iterator.release()
+
+  return createResult(200, "OK", result)
 
 def process_data(uuid, json):
   result = None

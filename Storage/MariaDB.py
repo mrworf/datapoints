@@ -11,9 +11,12 @@ import mysql.connector
 from mysql.connector import errorcode
 
 class MariaDB:
+
   def __init__(self):
     # Holds all the sources AND the last recorded value (based on time)
     self.cache = {}
+    self.GROUP_METHOD = [ 'SUM', 'AVG' ]
+
 
   def connect(self, user, pw, host, database):
     try:
@@ -168,9 +171,49 @@ class MariaDB:
       cursor.close()
     return False
 
-  def query(self, uuids, count = 0, groupby = 0, mode = Storage.GROUP_BY_SUM):
+  def source(self, uuid):
+    return self.sources(uuid)
+
+  def sources(self, uuid = None):
+    """
+    Returns registered sources and details about them
+    """
+    cursor = self.cnx.cursor(dictionary=True, buffered=True)
+    result = []
+
+    try:
+      if uuid is None:
+        query = 'SELECT uuid, name, type, accuracy, parameters FROM sources'
+        cursor.execute(query)
+      elif uuid in self.cache:
+        query = 'SELECT uuid, name, type, accuracy, parameters FROM sources WHERE id = %s' % self.cache[uuid]['id']
+        cursor.execute(query)
+      else:
+        logging.error('No such UUID: "%s"', repr(uuid));
+        return None
+      logging.debug("Statement: " + repr(cursor.statement))
+      for row in cursor:
+        print repr(row)
+        result.append(row)
+      return result
+    except mysql.connector.Error as err:
+      logging.error('Failed to record data: ' + repr(err));
+    finally:
+      cursor.close()
+    return None
+
+  def query_latest(self, uuids):
+    result = []
+    for u in uuids:
+      if u in self.cache:
+        result.append({'uuid' : u, 'ts' : self.cache[uuid]['latest']['ts'] , 'value' : self.cache[uuid]['latest']['value']})
+    return result
+
+  def query(self, uuids, ts_start = None, ts_end = None, count = 0, groupby = 0, mode = Storage.GROUP_BY_NONE, descending=False):
     """
     Retrieves data points from UUIDs
+    ts_start will limit results on timestamp. If negative, counts back from now
+    ts_end will limit results on timestamp. If negative, counts back from now
     Limit to count (zero means no limit)
     Group it by groupby seconds (zero means no grouping)
 
@@ -179,23 +222,57 @@ class MariaDB:
 
     Returns iterator which allows streaming of data
     """
-    pass
 
-  def query_range(self, uuids, start_ts, end_ts, groupby = 0, mode = Storage.GROUP_BY_SUM):
-    """
-    Retrieves data points from UUIDs
-    Limit by specifying start and end timestamp (both inclusive)
-    Group it by groupby seconds (zero means no grouping)
+    # Build the query
+    query = ''
+    if mode != Storage.GROUP_BY_NONE and groupby > 0:
+      if mode > len(self.GROUP_METHOD):
+        logging.error('This database doesn\'t support desired grouping method')
+        return None
+      query = 'SELECT uuid, %s(value) AS value, (ROUND(UNIX_TIMESTAMP(ts) / %d) * %d) AS ts ' % (self.GROUP_METHOD[mode-1], groupby, groupby)
+    else:
+      query = 'SELECT uuid, value, UNIX_TIMESTAMP(ts) AS ts '
 
-    Grouping essentially breaks it down to groups of X seconds, using
-    the described method in mode (default is sum)
+    query += 'FROM data LEFT JOIN sources ON data.source = sources.id WHERE id IN ('
+    for u in uuids:
+      if u in self.cache:
+        query += '%d,' % self.cache[u]['id']
+    query = query[:-1] + ') '
 
-    Returns iterator which allows streaming of data
-    """
-    pass
+    if ts_start is not None:
+      if ts_start < 0:
+        query += 'AND UNIX_TIMESTAMP(ts) >= UNIX_TIMESTAMP(NOW()%d) ' % ts_start
+      else:
+        query += 'AND UNIX_TIMESTAMP(ts) >= %d ' % ts_start
+    if ts_end is not None:
+      if ts_end < 0:
+        query += 'AND UNIX_TIMESTAMP(ts) <= UNIX_TIMESTAMP(NOW()%d) ' % ts_end
+      else:
+        query += 'AND UNIX_TIMESTAMP(ts) <= %d ' % ts_end
+
+    if mode != Storage.GROUP_BY_NONE:
+      query += 'GROUP BY source, (ROUND(UNIX_TIMESTAMP(ts) / %d) * %d) ' % (groupby, groupby)
+
+    query += 'ORDER BY ts '
+    if descending:
+      query += 'DESC '
+    if count > 0:
+      query += 'LIMIT %d' % count
+    logging.debug('Query statement: ' + query)
+
+    cursor = self.cnx.cursor(dictionary=True, buffered=True)
+    try:
+      cursor.execute(query)
+      return Iterator(cursor, None)
+    except mysql.connector.Error as err:
+      logging.error('Failed to record data: ' + repr(err));
+    cursor.close()
+    return Iterator(None, 'Error performing query')
 
 class Iterator:
   def __init__(self, resultset, error=None):
+    self.cursor = resultset
+    self.error = error
     pass
 
   def getError(self):
@@ -203,7 +280,7 @@ class Iterator:
     Returns any potential error, if no error condition exist,
     it will return None
     """
-    pass
+    return self.error
 
   def next(self):
     """
@@ -212,11 +289,19 @@ class Iterator:
 
     If no more record exists, the function returns None
     """
-    pass
+    if self.error is not None:
+      return None
+    rec = self.cursor.fetchone()
+    return rec
 
-  def cancel(self):
+  def release(self):
     """
     Early bailout, after calling this function, the iterator
     resources are freed and you should not use it anymore.
     """
-    pass
+    if self.error is not None:
+      return
+    self.error = 'Iterator is released'
+    self.cursor.close()
+    self.cursor = None
+    return
