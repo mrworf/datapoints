@@ -76,7 +76,7 @@ class MariaDB:
       return False
 
     sql = [
-      'CREATE TABLE sources (id int primary key auto_increment, name varchar(128) not null, uuid varchar(64) not null unique, type int not null, accuracy int not null, parameters text not null)',
+      'CREATE TABLE sources (id int primary key auto_increment, sid varchar(64) not null unique, name varchar(128) not null, uuid varchar(64) not null unique, type int not null, accuracy int not null, parameters text not null)',
       'CREATE TABLE data (ts datetime not null, source int not null, value int not null)'
     ]
 
@@ -120,15 +120,16 @@ class MariaDB:
       cursor.close()
     return False
 
-  def add_source(self, uuid, name, type = 0, accuracy = 1, parameters = ''):
-    query = 'INSERT INTO sources (uuid, name, type, accuracy, parameters) VALUES (%s, %s, %s, %s, %s)'
+  def add_source(self, uuid, sid, name, type = 0, accuracy = 1, parameters = ''):
+    query = 'INSERT INTO sources (uuid, sid, name, type, accuracy, parameters) VALUES (%s, %s, %s, %s, %s, %s)'
     cursor = self.cnx.cursor(buffered=True)
     try:
-      cursor.execute(query, (uuid, name, type, accuracy, parameters))
+      cursor.execute(query, (uuid, sid, name, type, accuracy, parameters))
       self.cnx.commit()
       self.cache[uuid] = {
         'id' : cursor.lastrowid,
         'uuid' : uuid,
+        'sid' : sid,
         'name' : name,
         'type' : type,
         'accuracy' : accuracy,
@@ -171,6 +172,21 @@ class MariaDB:
       cursor.close()
     return False
 
+  def sid2uuid(self, sid):
+    cursor = self.cnx.cursor(dictionary=True, buffered=True)
+    result = []
+    try:
+      print("SID: " + repr(sid))
+      query = 'SELECT uuid FROM sources WHERE sid = "%s"' % sid
+      cursor.execute(query)
+      result = cursor.fetchone()
+      return result['uuid']
+    except mysql.connector.Error as err:
+      logging.error('Failed to find data: ' + repr(err));
+    finally:
+      cursor.close()
+    return None
+
   def source(self, uuid):
     return self.sources(uuid)
 
@@ -183,17 +199,16 @@ class MariaDB:
 
     try:
       if uuid is None:
-        query = 'SELECT uuid, name, type, accuracy, parameters FROM sources'
+        query = 'SELECT uuid, sid, name, type, accuracy, parameters FROM sources'
         cursor.execute(query)
       elif uuid in self.cache:
-        query = 'SELECT uuid, name, type, accuracy, parameters FROM sources WHERE id = %s' % self.cache[uuid]['id']
+        query = 'SELECT uuid, sid, name, type, accuracy, parameters FROM sources WHERE id = %s' % self.cache[uuid]['id']
         cursor.execute(query)
       else:
         logging.error('No such UUID: "%s"', repr(uuid));
         return None
       logging.debug("Statement: " + repr(cursor.statement))
       for row in cursor:
-        print repr(row)
         result.append(row)
       return result
     except mysql.connector.Error as err:
