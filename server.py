@@ -60,7 +60,7 @@ from tornado.ioloop import IOLoop
 from tornado.web import Application, FallbackHandler
 from tornado.websocket import WebSocketHandler
 
-from flask import Flask, jsonify, abort, request
+from flask import Flask, jsonify, abort, request, make_response
 
 import mysql.connector
 from mysql.connector import errorcode
@@ -97,12 +97,19 @@ elif result != Storage.VALIDATION_OK:
 database.prepare()
 
 def createResult(http_code, status, data=None):
-  content = {"status" : status}
-  if data is not None:
-    content['data'] = data
-  ret = jsonify(content);
-  ret.status_code = http_code
-  ret.status = status
+  with app.app_context():
+    content = {"status" : status}
+    if data is not None:
+      content['data'] = data
+    ret = {"data" : json.dumps(content), "status" : status, "code" : http_code }
+    return ret
+
+def createResponse(content):
+  ret = make_response(content['data'])
+  if 'status' in content:
+    ret.status = content['status']
+  if 'code' in content:
+    ret.status_code = content['code']
   return ret
 
 @app.route("/register", methods=['POST'])
@@ -148,7 +155,7 @@ def register():
     else:
       result = createResult(200, "Source registered", {'uuid':uuid})
 
-  return result
+  return createResponse(result)
 
 @app.route('/entry/<uuid>', methods=['PUT', 'GET'])
 def add_data(uuid):
@@ -169,13 +176,13 @@ def add_data(uuid):
   if request.method == 'GET':
     json = database.query_latest([uuid])
     if json is None:
-      return createResult(500, 'No such UUID or no data')
-    return createResult(200, 'OK', json)
+      return createResponse(createResult(500, 'No such UUID or no data'))
+    return createResponse((200, 'OK', json))
   elif request.method == 'PUT':
     json = request.get_json()
-    return process_data(uuid, json)
+    return createResponse(process_data(uuid, json))
 
-@app.route('/sources', methods=['GET'], defaults={'uuid' : None})
+@app.route('/source', methods=['GET'], defaults={'uuid' : None})
 @app.route('/source/<uuid>', methods=['GET'])
 def list_sources(uuid):
   """
@@ -189,10 +196,10 @@ def list_sources(uuid):
 
   if data is None:
     if uuid is None:
-      return createResult(500, "Unable to get list of registered sources")
+      return createResponse(createResult(500, "Unable to get list of registered sources"))
     else:
-      return createResult(500, "Unable to get source, no such uuid?")
-  return createResult(200, "OK", data)
+      return createResponse(createResult(500, "Unable to get source, no such uuid?"))
+  return createResponse(createResult(200, "OK", data))
 
 @app.route('/query', methods=['POST'])
 def query():
@@ -225,7 +232,7 @@ def query():
   """
   json = request.get_json()
   if json is None or 'uuid' not in json:
-    return createResult(500, 'Missing uuid(s)')
+    return createResponse(createResult(500, 'Missing uuid(s)'))
 
   uuids = json['uuid']
   if not isinstance(uuids, list):
@@ -240,16 +247,16 @@ def query():
   elif mode == 'none':
     mode = Storage.GROUP_BY_NONE
   else:
-    return createResult(500, 'Unsupported mode')
+    return createResponse(createResult(500, 'Unsupported mode'))
 
   ts_start = ts_end = None
   if 'range' in json:
     ts_start = json['range'].get('start', None)
     ts_end   = json['range'].get('end', None)
     if ts_start is None and ts_end is None:
-      return createResult(500, 'Using range requires start, end or both')
+      return createResponse(createResult(500, 'Using range requires start, end or both'))
     if ts_end is not None and ts_start is not None and ts_end < ts_start:
-      return createResult(500, 'Start of range has to be before end of range')
+      return createResponse(createResult(500, 'Start of range has to be before end of range'))
 
   reverse = False
   if json.get('reverse', False) != False:
@@ -271,7 +278,7 @@ def query():
     e = iterator.next()
   iterator.release()
 
-  return createResult(200, "OK", result)
+  return createResponse(createResult(200, "OK", result))
 
 def process_data(uuid, json):
   result = None
@@ -323,22 +330,21 @@ class WebSocket(WebSocketHandler):
         for i in j:
           ret = process_data(i['uuid'], i['data'])
           if 'id' in i:
-            result.append({'status' : ret.status, 'status_code' : ret.status_code, 'id' : j['id']})
+            result.append({'status' : ret['status'], 'status_code' : ret['code'], 'id' : j['id']})
           else:
-            result.append({'status' : ret.status, 'status_code' : ret.status_code})
+            result.append({'status' : ret['status'], 'status_code' : ret['code']})
       else:
         ret = process_data(j['uuid'], j['data'])
-        result['status'] = ret.status
-        result['status_code'] = ret.status_code
+        result['status'] = ret['status']
+        result['status_code'] = ret['code']
         if 'id' in j:
           result['id'] = j['id']
     except Exception as e:
       logging.error('Source sent invalid message: ' + repr(e))
       result = {'status':'Invalid data', 'status_code':500, 'description' : repr(e)}
     finally:
+      print repr(result)
       self.write_message(json.dumps(result))
-
-    # Try decoding it as json
 
   def on_close(self):
     logging.info("Source disconnected")
