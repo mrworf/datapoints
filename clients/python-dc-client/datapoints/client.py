@@ -6,6 +6,7 @@ from __future__ import print_function
 import sys
 import re
 import urllib2, urllib
+import time
 
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
@@ -23,6 +24,8 @@ class client:
     self.connected = False
     self.server = server
     self.port = port
+    self.queue = []
+    self.atomic = atomic
 
     try:
       import websocket
@@ -44,7 +47,25 @@ class client:
       self.connected = False
     return self.connected
 
-  def register(self, name, type, accuracy=1, parameters=""):
+  def resolvesid(self, sid):
+    """Resolve the UUID for a SID.
+    """
+    url = 'http://%s:%d/resolve' % (self.server, self.port)
+    data = '{"sid":"%s"}' % (sid)
+    req = urllib2.Request(url, data)
+    req.add_header('Content-Type', 'application/json')    
+    try:
+      response = urllib2.urlopen(req)
+      result = response.read()
+      m = re.search('{"status": "([^"]+)", "data": {"uuid": "([^"]+)"}}', result)
+      if m is not None:
+        return m.group(2)
+    except:
+      eprint("Server error")
+    return None
+
+
+  def register(self, sid, name, type, accuracy=1, parameters=""):
     """Register a new source on the backend and return the UUID for it
     name is a human readable name for the source
     type is a number starting from zero, used by visualizer
@@ -52,7 +73,7 @@ class client:
     parameters is useful if the source has special abilities
     """
     url = 'http://%s:%d/register' % (self.server, self.port)
-    data = '{"name":"%s", "type":%d, "accuracy":%d,"parameters":"%s"}' % (name, type, accuracy, parameters)
+    data = '{"sid":"%s","name":"%s", "type":%d, "accuracy":%d,"parameters":"%s"}' % (sid, name, type, accuracy, parameters)
     req = urllib2.Request(url, data)
     req.add_header('Content-Type', 'application/json')    
     try:
@@ -89,16 +110,37 @@ class client:
     myid = self.counter
     self.counter += 1
 
+    if not self.atomic and timestamp is None:
+      # Generate local timestamp, otherwise queuing with fail
+      timestamp = int(round(time.time()))
+
     if timestamp is not None:
       extras = ',"timestamp":%d' % timestamp
 
     json = '{"uuid":"%s","data":{"value":%d%s},"id":"%s"}' % (self.tokens[reference], value, extras, myid)
 
+    # If we fail but aren't in atomic mode, store entry to send later...
+    sent = self._send(myid, json)
+    if not sent and not self.atomic:
+      eprint('Failed to send, queuing')
+      self.queue.append({"id": myid, "data": json})
+      return True
+    elif sent and len(self.queue) != 0:
+      # Since we succeeded and we have queued items, fire them off now too before returning
+      eprint('Sending queued items')
+      while len(self.queue):
+        item = self.queue[0]
+        if not self._send(item['id'], item['data']):
+          break
+        self.queue.pop(0)
+    return sent
+
+  def _send(self, id, data):
     if not self._connect():
       return False
 
     try:
-        if self.ws.send(json) == 0:
+        if self.ws.send(data) == 0:
           eprint("Not connected")
           self.connected = False
           return False
@@ -117,8 +159,8 @@ class client:
     # {"status": "OK", "status_code": 200, "id": "0"}
     m = re.search('{"status": "([^"]+)", "status_code": ([0-9]+), "id": "([^"]+)"}', result)
     if m is not None and m.group(1) == "OK":
-        if int(m.group(3)) != myid:
-            # We should be able to handle multiple concurrent calls, but for now...
-            eprint("WARNING: Result was not the same ID as sent (%d != %d)" % (int(m.group(3)), myid))
-        return True
+      if int(m.group(3)) != id:
+        # We should be able to handle multiple concurrent calls, but for now...
+        eprint("WARNING: Result was not the same ID as sent (%d != %d)" % (int(m.group(3)), id))
+      return True
     return False
