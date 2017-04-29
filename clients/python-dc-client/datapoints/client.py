@@ -47,7 +47,7 @@ class client:
       self.connected = False
     return self.connected
 
-  def resolvesid(self, sid):
+  def resolve_source_id(self, sid):
     """Resolve the UUID for a SID.
     """
     url = 'http://%s:%d/resolve' % (self.server, self.port)
@@ -64,8 +64,33 @@ class client:
       eprint("Server error")
     return None
 
+  def get_type(self, uuid):
+    url = 'http://%s:%d/type/%s' % (self.server, self.port, uuid)
+    req = urllib2.Request(url)
+    try:
+      response = urllib2.urlopen(req)
+      result = response.read()
+      m = re.search('{"status": "([^"]+)", "data": \[{"description": "([^"]*)", "uuid": "([^"]+)", "name": "([^"]+)"}\]}', result)
+      if m is not None:
+        return {"description": m.group(2), "name": m.group(3)}
+    except:
+      eprint("Server error")
+    return None
 
-  def register(self, sid, name, type, accuracy=1, parameters=""):
+  def register_type(self, uuid, name, description):
+    url = 'http://%s:%d/type/register' % (self.server, self.port)
+    data = '{"uuid":"%s","name":"%s", "description":"%s"}' % (uuid, name, description)
+    req = urllib2.Request(url, data)
+    req.add_header('Content-Type', 'application/json')
+    try:
+      response = urllib2.urlopen(req)
+      result = response.read()
+      return True
+    except:
+      eprint("Server error")
+    return False
+
+  def register_source(self, sid, name, type, accuracy=1, parameters=""):
     """Register a new source on the backend and return the UUID for it
     name is a human readable name for the source
     type is a number starting from zero, used by visualizer
@@ -73,7 +98,7 @@ class client:
     parameters is useful if the source has special abilities
     """
     url = 'http://%s:%d/register' % (self.server, self.port)
-    data = '{"sid":"%s","name":"%s", "type":%d, "accuracy":%d,"parameters":"%s"}' % (sid, name, type, accuracy, parameters)
+    data = '{"sid":"%s","name":"%s", "type":"%s", "accuracy":%d,"parameters":"%s"}' % (sid, name, type, accuracy, parameters)
     req = urllib2.Request(url, data)
     req.add_header('Content-Type', 'application/json')    
     try:

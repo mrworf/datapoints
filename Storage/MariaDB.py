@@ -15,6 +15,7 @@ class MariaDB:
   def __init__(self):
     # Holds all the sources AND the last recorded value (based on time)
     self.cache = {}
+    self._types = {}
     self.GROUP_METHOD = [ 'SUM', 'AVG' ]
 
 
@@ -77,7 +78,8 @@ class MariaDB:
 
     sql = [
       'CREATE TABLE sources (id int primary key auto_increment, sid varchar(64) not null unique, name varchar(128) not null, uuid varchar(64) not null unique, type int not null, accuracy int not null, parameters text not null)',
-      'CREATE TABLE data (ts datetime not null, source int not null, value int not null)'
+      'CREATE TABLE data (ts datetime not null, source int not null, value int not null)',
+      'CREATE TABLE types (id int primary key auto_increment, uuid varchar(64) not null unique, name varchar(128) not null, description TEXT not null)'
     ]
 
     cursor = self.cnx.cursor(buffered=True)
@@ -97,7 +99,7 @@ class MariaDB:
 
   def prepare(self):
     """
-    Loads up the cache and is now ready to be used
+    Loads up the cache and is now ready to be used (yes, this could be done by a join)
     """
     query = 'SELECT id, uuid, name, type, accuracy, parameters FROM sources'
     cursor = self.cnx.cursor(dictionary=True, buffered=True)
@@ -113,18 +115,54 @@ class MariaDB:
             'value' : r2['value'],
             'ts' : r2['ts']
           }
+    except mysql.connector.Error as err:
+      logging.error('Failed to prepare cache: ' + repr(err));
+    finally:
+      cursor.close()
+      cursor2.close()
+
+    query = 'SELECT id, uuid, name, description FROM types'
+    cursor = self.cnx.cursor(dictionary=True, buffered=True)
+    try:
+      cursor.execute(query)
+      for row in cursor:
+        self._types[row['uuid']] = row
       return True
     except mysql.connector.Error as err:
       logging.error('Failed to prepare cache: ' + repr(err));
     finally:
       cursor.close()
+
     return False
 
-  def add_source(self, uuid, sid, name, type = 0, accuracy = 1, parameters = ''):
-    query = 'INSERT INTO sources (uuid, sid, name, type, accuracy, parameters) VALUES (%s, %s, %s, %s, %s, %s)'
+  def add_type(self, uuid, name, description):
+    query = 'INSERT INTO types (uuid, name, description) VALUES (%s, %s, %s)'
     cursor = self.cnx.cursor(buffered=True)
     try:
-      cursor.execute(query, (uuid, sid, name, type, accuracy, parameters))
+      cursor.execute(query, (uuid, name, description))
+      self.cnx.commit()
+      self._types[uuid] = {
+        'id' : cursor.lastrowid,
+        'uuid' : uuid,
+        'name' : name,
+        'description' : description
+      }
+      return True
+    except mysql.connector.Error as err:
+      logging.error('Failed to add type: ' + repr(err));
+    finally:
+      cursor.close()
+    return False
+
+  def add_source(self, uuid, sid, name, type, accuracy = 1, parameters = ''):
+    query = 'INSERT INTO sources (uuid, sid, name, type, accuracy, parameters) VALUES (%s, %s, %s, %s, %s, %s)'
+    if type not in self._types:
+      return False
+    typeid = self._types[type]['id']
+
+    cursor = self.cnx.cursor(buffered=True)
+    try:
+      cursor.execute(query, (uuid, sid, name, typeid, accuracy, parameters))
       self.cnx.commit()
       self.cache[uuid] = {
         'id' : cursor.lastrowid,
@@ -183,6 +221,36 @@ class MariaDB:
       return result['uuid']
     except mysql.connector.Error as err:
       logging.error('Failed to find data: ' + repr(err));
+    finally:
+      cursor.close()
+    return None
+
+  def type(self, uuid):
+    return self.types(uuid)
+
+  def types(self, uuid=None):
+    cursor = self.cnx.cursor(dictionary=True, buffered=True)
+    result = []
+
+    print(repr(self._types))
+
+    try:
+      if uuid is None:
+        query = 'SELECT uuid, name, description FROM types'
+        cursor.execute(query)
+      elif uuid in self._types:
+        query = 'SELECT uuid, name, description FROM types WHERE id = %s' % self._types[uuid]['id']
+        print(repr(query))
+        cursor.execute(query)
+      else:
+        logging.error('No such UUID: "%s"', repr(uuid));
+        return None
+      logging.debug("Statement: " + repr(cursor.statement))
+      for row in cursor:
+        result.append(row)
+      return result
+    except mysql.connector.Error as err:
+      logging.error('Failed to record data: ' + repr(err));
     finally:
       cursor.close()
     return None
